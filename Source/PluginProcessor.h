@@ -2,6 +2,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <array>
 
 class FxSaturationAudioProcessor : public juce::AudioProcessor
 {
@@ -41,20 +42,42 @@ public:
     static APVTS::ParameterLayout createParameterLayout();
     APVTS parameters { *this, nullptr, "PARAMETERS", createParameterLayout() };
 
+    // ===== Scope (oscilloscope) bridge API =====
+    // Read up to maxSamples from the internal scope FIFO into dest. Returns number of samples read.
+    int readScope (float* dest, int maxSamples) noexcept;
+    // Reset scope buffers (called on prepareToPlay)
+    void resetScope() noexcept;
+    // Expose sample rate for UI helpers
+    double getSampleRateHz() const noexcept { return sampleRate; }
+
 private:
-    std::atomic<float>* driveParam = nullptr; // cached pointer for speed
+    // Cached parameter pointers
+    std::atomic<float>* driveDbParam  = nullptr; // dB
+    std::atomic<float>* outputDbParam = nullptr; // dB
+    std::atomic<float>* mixParam      = nullptr; // 0..1
+    std::atomic<float>* toneParam     = nullptr; // -1..1 (tilt)
+    std::atomic<float>* biasParam     = nullptr; // -1..1
 
-    // Simple per-sample saturation
-    static inline float saturateSample (float x, float drive)
-    {
-        const float minGain = 1.0f;
-        const float maxGain = 20.0f;
-        const float gain = minGain + drive * (maxGain - minGain);
+    // Simple utility conversions
+    static inline float dbToGain (float db) { return std::pow (10.0f, db * 0.05f); }
 
-        const float y = std::tanh (gain * x);
-        const float normalize = 1.0f / std::tanh (maxGain);
-        return y * normalize;
-    }
+    // One-pole lowpass state per channel for tone control
+    double sampleRate = 44100.0;
+    struct ToneState { float lp = 0.0f; };
+    std::vector<ToneState> toneStates;
+
+    // Simple per-sample saturation (tanh)
+    static inline float saturateTanh (float x) { return std::tanh (x); }
+
+    // ===== Scope (oscilloscope) data transport =====
+    static constexpr int kScopeCapacity = 32768; // samples in the ring buffer
+    juce::AbstractFifo scopeFifo { kScopeCapacity };
+    std::array<float, kScopeCapacity> scopeRing {};
+
+    // Simple saturation activity meter for UI (0..1)
+    std::atomic<float> satLevel { 0.0f };
+public:
+    float getSaturationLevel() const noexcept { return satLevel.load(); }
 };
 
 // Factory function required by JUCE plugin client
