@@ -4,9 +4,15 @@ project(_fx_saturation VERSION 0.1.0)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Build for Apple Silicon by default (you can add "x86_64;arm64" for universal)
+# Point JUCE to the in-tree Steinberg VST3 SDK
+# This ensures VST3 builds use the SDK bundled with this repository
+set(JUCE_VST3_SDK_PATH "${CMAKE_SOURCE_DIR}/vst3sdk" CACHE PATH "Path to local VST3 SDK" FORCE)
+# Also set the legacy variable some tools still read
+set(VST3_SDK_DIR "${CMAKE_SOURCE_DIR}/vst3sdk" CACHE PATH "Path to local VST3 SDK (legacy var)" FORCE)
+
+# Build universal binaries on macOS (Apple Silicon + Intel)
 if(APPLE)
-    set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build architectures" FORCE)
+    set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64" CACHE STRING "Build architectures" FORCE)
 endif()
 
 # Add JUCE (vendored in this repo)
