@@ -1,331 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "PluginProcessor.h"
+#include "PluginEditor.h"
 #include <cstring>
-
-namespace {
-class BasicEditor : public juce::AudioProcessorEditor, private juce::Timer {
-public:
-    explicit BasicEditor (FxSaturationAudioProcessor& p)
-        : juce::AudioProcessorEditor (&p), proc (p)
-    {
-        using Slider = juce::Slider;
-
-        auto setupKnob = [this] (juce::Slider& s, const juce::String& name) {
-            s.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-            s.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 64, 18);
-            s.setName (name);
-            addAndMakeVisible (s);
-        };
-
-        setupKnob (input,  "Input");
-        setupKnob (drive,  "Drive");
-        setupKnob (output, "Output");
-        setupKnob (mix,    "Mix");
-        setupKnob (tone,   "Tone");
-        setupKnob (bias,   "Bias");
-        setupKnob (zoom,   "Zoom");
-
-        // Value readouts improvements
-        input.setTextValueSuffix (" dB");
-        drive.setTextValueSuffix (" dB");
-        output.setTextValueSuffix (" dB");
-        genFreq.setTextValueSuffix (" Hz");
-
-        mix.textFromValueFunction = [] (double v) { return juce::String (juce::roundToInt (v * 100.0)) + " %"; };
-        mix.valueFromTextFunction = [] (const juce::String& t) {
-            auto s = t.upToFirstOccurrenceOf ("%", false, false).trim();
-            return juce::jlimit (0.0, 1.0, s.getDoubleValue() / 100.0);
-        };
-        genAmp.textFromValueFunction = [] (double v) { return juce::String (juce::roundToInt (v * 100.0)) + " %"; };
-        genAmp.valueFromTextFunction = [] (const juce::String& t) {
-            auto s = t.upToFirstOccurrenceOf ("%", false, false).trim();
-            return juce::jlimit (0.0, 1.0, s.getDoubleValue() / 100.0);
-        };
-
-        drive.setSkewFactor (0.6); // more resolution at lower drive
-
-        inputAttachment  = std::make_unique<Attachment> (proc.parameters, "inputDb",  input);
-        driveAttachment  = std::make_unique<Attachment> (proc.parameters, "driveDb",  drive);
-        outputAttachment = std::make_unique<Attachment> (proc.parameters, "outputDb", output);
-        mixAttachment    = std::make_unique<Attachment> (proc.parameters, "mix",     mix);
-        toneAttachment   = std::make_unique<Attachment> (proc.parameters, "tone",    tone);
-        biasAttachment   = std::make_unique<Attachment> (proc.parameters, "bias",    bias);
-        zoomAttachment   = std::make_unique<Attachment> (proc.parameters, "scopeZoom", zoom);
-
-        // Mode selector
-        modeBox.addItemList (juce::StringArray { "Tanh", "Hard Clip", "Soft Cubic", "Arctan", "Even (Rect)", "Odd Cubic" }, 1);
-        addAndMakeVisible (modeBox);
-        modeAttachment = std::make_unique<ComboAttachment> (proc.parameters, "mode", modeBox);
-
-        // Oversampling selector
-        osBox.addItemList (juce::StringArray { "Off", "2x" }, 1);
-        addAndMakeVisible (osBox);
-        osAttachment = std::make_unique<ComboAttachment> (proc.parameters, "osMode", osBox);
-
-        // Oscilloscope setup
-        scope.setNumChannels (1);
-        scope.setBufferSize (2048);
-        scope.setSamplesPerBlock (256);
-        scope.setColours (juce::Colours::black, juce::Colours::lime.withAlpha (0.9f));
-        addAndMakeVisible (scope);
-
-        // Generator controls (UI-only; feeds the scope)
-        genEnable.setButtonText ("Gen");
-        genEnable.setTooltip ("Enable internal signal generator feeding the scope");
-        addAndMakeVisible (genEnable);
-
-        genFreq.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-        genFreq.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 64, 18);
-        genFreq.setRange (20.0, 5000.0, 0.01);
-        genFreq.setSkewFactorFromMidPoint (500.0);
-        genFreq.setValue (1000.0);
-        genFreq.setName ("Freq");
-        addAndMakeVisible (genFreq);
-
-        genAmp.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-        genAmp.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 64, 18);
-        genAmp.setRange (0.0, 1.0, 0.0001);
-        genAmp.setValue (0.5);
-        genAmp.setName ("Amp");
-        addAndMakeVisible (genAmp);
-
-        // Labels for controls
-        auto makeLabel = [this] (juce::Label& l, const juce::String& text)
-        {
-            l.setText (text, juce::dontSendNotification);
-            l.setJustificationType (juce::Justification::centred);
-            l.setColour (juce::Label::textColourId, juce::Colours::white);
-            l.setInterceptsMouseClicks (false, false);
-            addAndMakeVisible (l);
-        };
-        makeLabel (inputLabel,  "Input");
-        makeLabel (driveLabel,  "Drive");
-        makeLabel (outputLabel, "Output");
-        makeLabel (mixLabel,    "Mix");
-        makeLabel (toneLabel,   "Tone");
-        makeLabel (biasLabel,   "Bias");
-        makeLabel (freqLabel,   "Freq");
-        makeLabel (ampLabel,    "Amp");
-        makeLabel (modeLabel,   "Mode");
-        makeLabel (zoomLabel,   "Zoom");
-        makeLabel (osLabel,     "OS");
-
-        // Simple saturation LED
-        addAndMakeVisible (satLed);
-
-        // Simple meters
-        addAndMakeVisible (inMeter);
-        addAndMakeVisible (outMeter);
-
-        setResizable (true, true);
-        setSize (720, 420);
-
-        startTimerHz (60);
-    }
-
-    void paint (juce::Graphics& g) override
-    {
-        g.fillAll (juce::Colours::black);
-        auto area = getLocalBounds();
-        ColourTitleBar title (area.removeFromTop (28), "_fx_saturation", juce::Colours::orange);
-        title.paint (g);
-    }
-
-    void resized() override
-    {
-        auto r = getLocalBounds().reduced (12);
-        r.removeFromTop (32); // title spacing
-
-        // Top: scope
-        auto scopeArea = r.removeFromTop (juce::jmax (80, r.getHeight() / 2)).reduced (4);
-        scope.setBounds (scopeArea);
-
-        // Bottom: controls
-        auto row = r.removeFromTop (r.getHeight());
-        auto w = row.getWidth() / 14; // 6 knobs + Gen + Freq + Amp + LED + Mode + Zoom + OS + 2 meters
-        auto makeBox = [&] () { return row.removeFromLeft (w).reduced (6); };
-        auto bInput  = makeBox();
-        auto bDrive  = makeBox();
-        auto bOutput = makeBox();
-        auto bMix    = makeBox();
-        auto bTone   = makeBox();
-        auto bBias   = makeBox();
-        auto bGenTgl = makeBox();
-        auto bFreq   = makeBox();
-        auto bAmp    = makeBox();
-        auto bLed    = makeBox();
-        auto bInMet  = makeBox();
-        auto bOutMet = makeBox();
-        auto bMode   = makeBox();
-        auto bZoom   = makeBox();
-        auto bOS     = row.reduced (6);
-
-        input.setBounds  (bInput);
-        drive.setBounds  (bDrive);
-        output.setBounds (bOutput);
-        mix.setBounds    (bMix);
-        tone.setBounds   (bTone);
-        bias.setBounds   (bBias);
-        genEnable.setBounds (bGenTgl);
-        genFreq.setBounds   (bFreq);
-        genAmp.setBounds    (bAmp);
-        satLed.setBounds    (bLed);
-        modeBox.setBounds   (bMode);
-        zoom.setBounds      (bZoom);
-        osBox.setBounds     (bOS);
-        inMeter.setBounds   (bInMet);
-        outMeter.setBounds  (bOutMet);
-
-        const int labelHeight = 16;
-        auto placeLabelAbove = [labelHeight] (juce::Label& l, juce::Rectangle<int> target) {
-            l.setBounds (target.withHeight (labelHeight).translated (0, -labelHeight - 2));
-        };
-        placeLabelAbove (inputLabel,  bInput);
-        placeLabelAbove (driveLabel,  bDrive);
-        placeLabelAbove (outputLabel, bOutput);
-        placeLabelAbove (mixLabel,    bMix);
-        placeLabelAbove (toneLabel,   bTone);
-        placeLabelAbove (biasLabel,   bBias);
-        placeLabelAbove (freqLabel,   bFreq);
-        placeLabelAbove (ampLabel,    bAmp);
-        placeLabelAbove (modeLabel,   bMode);
-        placeLabelAbove (zoomLabel,   bZoom);
-        placeLabelAbove (osLabel,     bOS);
-    }
-
-private:
-    void timerCallback() override
-    {
-        const int visualBlock = 256;
-
-        // Update scope resolution based on zoom slider
-        {
-            const double z = juce::jlimit (0.0, 1.0, (double) zoom.getValue());
-            // Map 0..1 to samples-per-block from 512 (far) to 16 (close)
-            const int spp = (int) juce::jlimit (16, 1024, (int) std::round (512.0 * std::pow (0.5, 3.0 * z)));
-            if (spp != lastSpp)
-            {
-                lastSpp = spp;
-                scope.setSamplesPerBlock (spp);
-                // Keep a few seconds of history regardless of spp
-                const int desiredHistorySamples = 4096;
-                scope.setBufferSize (juce::jmax (desiredHistorySamples / spp, 64));
-            }
-        }
-
-        if (genEnable.getToggleState())
-        {
-            // Generate sine for the scope
-            ensureBufferSize (genTemp, visualBlock);
-            const double sr = juce::jmax (1.0, proc.getSampleRateHz());
-            const double freq = genFreq.getValue();
-            const float amp = (float) genAmp.getValue();
-            const double inc = juce::MathConstants<double>::twoPi * freq / sr;
-            for (int i = 0; i < visualBlock; ++i)
-            {
-                genPhase += inc;
-                if (genPhase > juce::MathConstants<double>::twoPi)
-                    genPhase -= juce::MathConstants<double>::twoPi;
-                genTemp[i] = amp * (float) std::sin (genPhase);
-            }
-            const float* chans1[] = { genTemp.data() };
-            scope.pushBuffer (chans1, 1, visualBlock);
-        }
-        else
-        {
-            // Drain processor scope FIFO
-            ensureBufferSize (scopeTemp, visualBlock);
-            const int n = proc.readScope (scopeTemp.data(), visualBlock);
-            if (n > 0) {
-                const float* chans2[] = { scopeTemp.data() };
-                scope.pushBuffer (chans2, 1, n);
-            }
-        }
-
-        // Update saturation LED from processor
-        satLed.setLevel ((float) proc.getSaturationLevel());
-        inMeter.setLevel (proc.getInputPeak());
-        outMeter.setLevel (proc.getOutputPeak());
-    }
-
-    static void ensureBufferSize (std::vector<float>& v, int n)
-    {
-        if ((int) v.size() < n) v.resize ((size_t) n, 0.0f);
-    }
-
-    // A tiny helper for a coloured title bar
-    class ColourTitleBar {
-    public:
-        ColourTitleBar (juce::Rectangle<int> b, juce::String t, juce::Colour c)
-            : bounds (b), text (std::move (t)), colour (c) {}
-        void paint (juce::Graphics& g) const {
-            g.setColour (colour.withAlpha (0.14f));
-            g.fillRect (bounds);
-            g.setColour (colour);
-            g.drawFittedText (text, bounds, juce::Justification::centredLeft, 1);
-        }
-    private:
-        juce::Rectangle<int> bounds; juce::String text; juce::Colour colour;
-    };
-
-    // Tiny LED widget indicating recent saturation activity
-    class SatLED : public juce::Component {
-    public:
-        void setLevel (float l) { level = juce::jlimit (0.0f, 1.0f, l); repaint(); }
-        void paint (juce::Graphics& g) override {
-            auto bounds = getLocalBounds();
-            auto textArea = bounds.removeFromLeft (bounds.getWidth() / 2);
-            g.setColour (juce::Colours::white.withAlpha (0.8f));
-            g.drawFittedText ("SAT", textArea, juce::Justification::centred, 1);
-            auto led = bounds.reduced (4);
-            auto colour = juce::Colours::red.withAlpha (0.25f + 0.75f * level);
-            if (level > 0.6f)
-                colour = colour.interpolatedWith (juce::Colours::yellow, (level - 0.6f) / 0.4f);
-            g.setColour (colour);
-            g.fillEllipse (led.toFloat());
-            g.setColour (juce::Colours::dimgrey);
-            g.drawEllipse (led.toFloat(), 1.0f);
-        }
-    private:
-        float level = 0.0f;
-    };
-
-    // Minimal vertical peak meter (0..1)
-    class PeakMeter : public juce::Component {
-    public:
-        void setLevel (float l) { level = juce::jlimit (0.0f, 1.0f, l); repaint(); }
-        void paint (juce::Graphics& g) override {
-            auto r = getLocalBounds().reduced (3);
-            g.setColour (juce::Colours::dimgrey);
-            g.drawRect (r);
-            auto h = (int) std::round (r.getHeight() * level);
-            auto fill = r.removeFromBottom (h);
-            g.setColour (juce::Colours::chartreuse.withAlpha (0.9f));
-            g.fillRect (fill);
-        }
-    private:
-        float level = 0.0f;
-    };
-
-    using Attachment = juce::AudioProcessorValueTreeState::SliderAttachment;
-    using ComboAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
-    FxSaturationAudioProcessor& proc;
-    juce::AudioVisualiserComponent scope { 1 };
-    juce::Slider input, drive, output, mix, tone, bias, zoom;
-    juce::ToggleButton genEnable;
-    juce::Slider genFreq, genAmp;
-    juce::Label inputLabel, driveLabel, outputLabel, mixLabel, toneLabel, biasLabel, freqLabel, ampLabel, modeLabel, zoomLabel, osLabel;
-    SatLED satLed;
-    PeakMeter inMeter, outMeter;
-    juce::ComboBox modeBox;
-    juce::ComboBox osBox;
-    std::vector<float> genTemp, scopeTemp;
-    double genPhase = 0.0;
-    std::unique_ptr<Attachment> inputAttachment, driveAttachment, outputAttachment, mixAttachment, toneAttachment, biasAttachment, zoomAttachment;
-    std::unique_ptr<ComboAttachment> modeAttachment, osAttachment;
-    int lastSpp = -1;
-};
-} // namespace
 
 //==============================================================================
 FxSaturationAudioProcessor::FxSaturationAudioProcessor()
@@ -348,21 +24,48 @@ FxSaturationAudioProcessor::FxSaturationAudioProcessor()
 void FxSaturationAudioProcessor::prepareToPlay (double newSampleRate, int /*samplesPerBlock*/)
 {
     sampleRate = newSampleRate > 0.0 ? newSampleRate : 44100.0;
+
+    // Initialize smoothing
+    const double smoothingTime = 0.02; // 20ms
+    inputGainSmoothed.reset (sampleRate, smoothingTime);
+    driveGainSmoothed.reset (sampleRate, smoothingTime);
+    outputGainSmoothed.reset (sampleRate, smoothingTime);
+    mixSmoothed.reset (sampleRate, smoothingTime);
+    toneSmoothed.reset (sampleRate, smoothingTime);
+    biasSmoothed.reset (sampleRate, smoothingTime);
+
+    // Set initial values
+    if (inputDbParam != nullptr)  inputGainSmoothed.setCurrentAndTargetValue (dbToGain (inputDbParam->load()));
+    if (driveDbParam != nullptr)  driveGainSmoothed.setCurrentAndTargetValue (dbToGain (driveDbParam->load()));
+    if (outputDbParam != nullptr) outputGainSmoothed.setCurrentAndTargetValue (dbToGain (outputDbParam->load()));
+    if (mixParam != nullptr)      mixSmoothed.setCurrentAndTargetValue (mixParam->load());
+    if (toneParam != nullptr)     toneSmoothed.setCurrentAndTargetValue (toneParam->load());
+    if (biasParam != nullptr)     biasSmoothed.setCurrentAndTargetValue (biasParam->load());
+
     // Prepare tone filter states for max possible channels (updated in processBlock)
     const int maxCh = std::max (getTotalNumInputChannels(), getTotalNumOutputChannels());
-    toneStates.assign ((size_t) std::max (1, maxCh), {});
+    toneProcessors.resize ((size_t) std::max (1, maxCh));
+    juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) 512, (juce::uint32) maxCh };
+    for (auto& tp : toneProcessors) tp.prepare (spec);
+
     resetScope();
 
     // Setup/recreate oversampling based on current parameter
     int mode = 0;
-    if (osModeParam != nullptr) mode = juce::jlimit (0, 1, (int) std::round (osModeParam->load()));
-    osFactor = (mode == 1 ? 2 : 1);
+    if (osModeParam != nullptr) mode = (int) std::round (osModeParam->load());
+    
+    osFactor = 1;
+    int stages = 0;
+    if (mode == 1) { osFactor = 2; stages = 1; }
+    else if (mode == 2) { osFactor = 4; stages = 2; }
+    else if (mode == 3) { osFactor = 8; stages = 3; }
+
     if (osFactor == 1) {
         oversampling.reset();
         setLatencySamples (0);
     } else {
         const int numCh = std::max (1, getTotalNumOutputChannels());
-        oversampling = std::make_unique<juce::dsp::Oversampling<float>>(numCh, /*numStages*/ 1,
+        oversampling = std::make_unique<juce::dsp::Oversampling<float>>(numCh, stages,
             juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, /*isMinPhase*/ false);
         oversampling->reset();
         oversampling->initProcessing ((size_t) 512);
@@ -394,67 +97,89 @@ void FxSaturationAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
     const int numChannels = buffer.getNumChannels();
     const int numSamples  = buffer.getNumSamples();
-    // Read parameters (with safe defaults)
-    const float inDb    = inputDbParam != nullptr ? inputDbParam->load() : 0.0f;
-    const float driveDb  = driveDbParam  != nullptr ? driveDbParam->load()  : 12.0f;
-    const float outDb    = outputDbParam != nullptr ? outputDbParam->load() : 0.0f;
-    const float mix      = mixParam      != nullptr ? juce::jlimit (0.0f, 1.0f, mixParam->load()) : 1.0f;
-    const float tone     = toneParam     != nullptr ? juce::jlimit (-1.0f, 1.0f, toneParam->load()) : 0.0f;
-    const float biasAmt  = biasParam     != nullptr ? juce::jlimit (-1.0f, 1.0f, biasParam->load()) : 0.0f;
 
-    const float inGain   = dbToGain (inDb);
-    const float driveGain = dbToGain (driveDb);
-    const float outGain   = dbToGain (outDb);
+    // Update targets for smoothing
+    if (inputDbParam != nullptr)  inputGainSmoothed.setTargetValue (dbToGain (inputDbParam->load()));
+    if (driveDbParam != nullptr)  driveGainSmoothed.setTargetValue (dbToGain (driveDbParam->load()));
+    if (outputDbParam != nullptr) outputGainSmoothed.setTargetValue (dbToGain (outputDbParam->load()));
+    if (mixParam != nullptr)      mixSmoothed.setTargetValue (juce::jlimit (0.0f, 1.0f, mixParam->load()));
+    if (toneParam != nullptr)     toneSmoothed.setTargetValue (juce::jlimit (-1.0f, 1.0f, toneParam->load()));
+    if (biasParam != nullptr)     biasSmoothed.setTargetValue (juce::jlimit (-1.0f, 1.0f, biasParam->load()));
 
-    if ((int) toneStates.size() < numChannels)
-        toneStates.resize ((size_t) numChannels);
+    if ((int) toneProcessors.size() < numChannels)
+        toneProcessors.resize ((size_t) numChannels);
 
-    // Tone LPF coefficient (fixed cutoff around 800 Hz). Compute base-rate and OS-rate variants.
-    const float fc = 800.0f;
-    const float aBase = std::exp (-2.0f * juce::MathConstants<float>::pi * fc / (float) sampleRate);
-    const float bBase = 1.0f - aBase;
-    const float aOS   = std::exp (-2.0f * juce::MathConstants<float>::pi * fc / (float) (sampleRate * 2.0));
-    const float bOS   = 1.0f - aOS;
+    // Update Tone filters based on smoothed value
+    const float toneFreq = 2000.0f;
+    for (int ch = 0; ch < (int) toneProcessors.size(); ++ch)
+    {
+        const float t = toneSmoothed.getCurrentValue();
+        if (t >= 0.0f) {
+            // High shelf boost
+            *toneProcessors[(size_t)ch].filter.coefficients = *juce::dsp::IIR::Coefficients<float>::makeHighShelf (sampleRate * osFactor, toneFreq, 0.707f, dbToGain (t * 6.0f));
+        } else {
+            // Low shelf boost (effectively high cut relative to low)
+            *toneProcessors[(size_t)ch].filter.coefficients = *juce::dsp::IIR::Coefficients<float>::makeLowShelf (sampleRate * osFactor, toneFreq, 0.707f, dbToGain (-t * 6.0f));
+        }
+    }
 
     float satPeak = 0.0f;
     float inPk = 0.0f, outPk = 0.0f;
 
     // Save dry (post-input gain) for mix
     dryBuffer.setSize (numChannels, numSamples, false, false, true);
+
+    // Process input gain and meter (pre-OS)
     for (int ch = 0; ch < numChannels; ++ch)
     {
         const float* src = buffer.getReadPointer (ch);
         float* dry = dryBuffer.getWritePointer (ch);
+        
+        // We use a local copy of the smoother to process this channel's dry buffer
+        auto inputSmoother = inputGainSmoothed;
         for (int i = 0; i < numSamples; ++i) {
-            const float v = inGain * src[i];
+            const float v = inputSmoother.getNextValue() * src[i];
             dry[i] = v;
             inPk = juce::jmax (inPk, std::abs (v));
         }
     }
 
     // Process path (possibly oversampled)
-    if (osFactor == 2 && oversampling != nullptr)
+    if (osFactor > 1 && oversampling != nullptr)
     {
         // Up -> process -> Down
         juce::dsp::AudioBlock<float> inBlock (dryBuffer);
         auto upBlock = oversampling->processSamplesUp (inBlock);
 
-        // Per-sample shape at 2x, process in-place on upBlock
+        // Per-sample shape at osFactor, process in-place on upBlock
         const int osNumSamples = (int) upBlock.getNumSamples();
         const int osNumCh = (int) upBlock.getNumChannels();
+        
         for (int ch = 0; ch < osNumCh; ++ch)
         {
             float* s = upBlock.getChannelPointer ((size_t) ch);
-            auto& st = toneStates[(size_t) (ch % (int) toneStates.size())];
+            auto& tp = toneProcessors[(size_t) (ch % (int) toneProcessors.size())];
+            
+            auto toneOS = toneSmoothed;
+            auto biasOS = biasSmoothed;
+            auto driveOS = driveGainSmoothed;
+
             for (int i = 0; i < osNumSamples; ++i)
             {
-                const float dry = s[i];
-                st.lp = aOS * st.lp + bOS * dry;
-                const float hp = dry - st.lp;
-                const float pre = dry + tone * hp;
-                const float x = pre + 0.2f * biasAmt;
+                // Advance smoothers only on even samples to keep timing consistent with base rate
+                if (i % osFactor == 0) {
+                    toneOS.getNextValue();
+                    biasOS.getNextValue();
+                    driveOS.getNextValue();
+                }
+                const float currentBias = biasOS.getCurrentValue();
+                const float currentDrive = driveOS.getCurrentValue();
+
+                const float dryVal = s[i];
+                const float pre = tp.filter.processSample (dryVal);
+                const float x = pre + 0.2f * currentBias;
                 const float preDrive = x;
-                const float d = driveGain * preDrive;
+                const float d = currentDrive * preDrive;
                 int mode = 0;
                 if (modeParam != nullptr)
                     mode = juce::jlimit (0, 5, (int) std::round (modeParam->load()));
@@ -487,10 +212,15 @@ void FxSaturationAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         {
             float* dst = buffer.getWritePointer (ch);
             const float* dry = dryBuffer.getReadPointer (ch);
+            
+            auto mixSm = mixSmoothed;
+            auto outSm = outputGainSmoothed;
+
             for (int i = 0; i < numSamples; ++i)
             {
-                float y = mix * dst[i] + (1.0f - mix) * dry[i];
-                y *= outGain;
+                const float m = mixSm.getNextValue();
+                float y = m * dst[i] + (1.0f - m) * dry[i];
+                y *= outSm.getNextValue();
                 const float yClipped = juce::jlimit (-1.0f, 1.0f, y);
                 dst[i] = yClipped;
                 if (ch == 0)
@@ -514,19 +244,22 @@ void FxSaturationAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         {
             float* samples = buffer.getWritePointer (ch);
             const float* dryPostIn = dryBuffer.getReadPointer (ch);
-            auto& st = toneStates[(size_t) ch];
+            auto& tp = toneProcessors[(size_t) ch];
+
+            auto biasSm  = biasSmoothed;
+            auto driveSm = driveGainSmoothed;
+            auto mixSm   = mixSmoothed;
+            auto outSm   = outputGainSmoothed;
+
             for (int i = 0; i < numSamples; ++i)
             {
-                const float dry = dryPostIn[i];
-                // One-pole lowpass for tilt EQ
-                st.lp = aBase * st.lp + bBase * dry;
-                const float hp = dry - st.lp; // high-passed portion
-                const float pre = dry + tone * hp; // tilt: boost/cut highs
+                const float dryVal = dryPostIn[i];
+                const float pre = tp.filter.processSample (dryVal);
                 // Add bias to create asymmetry (subtle range)
-                const float x = pre + 0.2f * biasAmt;
+                const float x = pre + 0.2f * biasSm.getNextValue();
                 // Waveshape
                 const float preDrive = x;
-                const float d = driveGain * preDrive;
+                const float d = driveSm.getNextValue() * preDrive;
                 int mode = 0;
                 if (modeParam != nullptr)
                     mode = juce::jlimit (0, 5, (int) std::round (modeParam->load()));
@@ -541,8 +274,9 @@ void FxSaturationAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                     case 0:
                     default: ySat = saturateTanh (d); break;
                 }
-                float y = mix * ySat + (1.0f - mix) * dry;
-                y *= outGain;
+                const float m = mixSm.getNextValue();
+                float y = m * ySat + (1.0f - m) * dryVal;
+                y *= outSm.getNextValue();
                 const float yClipped = juce::jlimit (-1.0f, 1.0f, y);
                 samples[i] = yClipped;
                 if (ch == 0)
@@ -562,6 +296,14 @@ void FxSaturationAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         }
     }
 
+    // Advance the main smoothers by the number of samples processed
+    inputGainSmoothed.skip (numSamples);
+    driveGainSmoothed.skip (numSamples);
+    outputGainSmoothed.skip (numSamples);
+    mixSmoothed.skip (numSamples);
+    toneSmoothed.skip (numSamples);
+    biasSmoothed.skip (numSamples);
+
     // Smooth and publish saturation level for UI (0..1)
     float old = satLevel.load (std::memory_order_relaxed);
     float newLvl = juce::jlimit (0.0f, 1.0f, satPeak);
@@ -577,7 +319,7 @@ void FxSaturationAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 juce::AudioProcessorEditor* FxSaturationAudioProcessor::createEditor()
 {
     // Use custom editor for a better UX
-    return new BasicEditor (*this);
+    return new FxSaturationAudioProcessorEditor (*this);
 }
 
 //==============================================================================
@@ -661,7 +403,7 @@ FxSaturationAudioProcessor::APVTS::ParameterLayout FxSaturationAudioProcessor::c
     params.push_back (std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID{"osMode", 1},
         "Oversampling",
-        juce::StringArray{ "Off", "2x" },
+        juce::StringArray{ "Off", "2x", "4x", "8x" },
         0));
 
     return { params.begin(), params.end() };

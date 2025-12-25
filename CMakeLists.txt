@@ -45,6 +45,8 @@ target_sources(_fx_saturation
     PRIVATE
         Source/PluginProcessor.cpp
         Source/PluginProcessor.h
+        Source/PluginEditor.cpp
+        Source/PluginEditor.h
 )
 
 target_compile_definitions(_fx_saturation

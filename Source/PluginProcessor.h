@@ -65,10 +65,23 @@ private:
     // Simple utility conversions
     static inline float dbToGain (float db) { return std::pow (10.0f, db * 0.05f); }
 
-    // One-pole lowpass state per channel for tone control
+    // Parameter smoothing
+    juce::LinearSmoothedValue<float> inputGainSmoothed;
+    juce::LinearSmoothedValue<float> driveGainSmoothed;
+    juce::LinearSmoothedValue<float> outputGainSmoothed;
+    juce::LinearSmoothedValue<float> mixSmoothed;
+    juce::LinearSmoothedValue<float> toneSmoothed;
+    juce::LinearSmoothedValue<float> biasSmoothed;
+
+    // Tone EQ
+    struct ToneProcessor {
+        juce::dsp::IIR::Filter<float> filter;
+        void prepare (const juce::dsp::ProcessSpec& spec) { filter.prepare (spec); }
+        void reset() { filter.reset(); }
+    };
+    std::vector<ToneProcessor> toneProcessors;
+
     double sampleRate = 44100.0;
-    struct ToneState { float lp = 0.0f; };
-    std::vector<ToneState> toneStates;
 
     // Oversampling
     std::unique_ptr<juce::dsp::Oversampling<float>> oversampling;
