@@ -1,0 +1,22 @@
+C:\Users\brent\AppData\Local\Programs\CLion\bin\cmake\win\x64\bin\cmake.exe -DCMAKE_BUILD_TYPE=Debug -G "MinGW Makefiles" -S Z:\_fx_saturation -B Z:\_fx_saturation\cmake-build-debug
+-- The C compiler identification is GNU 13.1.0
+-- The CXX compiler identification is GNU 13.1.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: C:/Users/brent/AppData/Local/Programs/CLion/bin/mingw/bin/gcc.exe - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: C:/Users/brent/AppData/Local/Programs/CLion/bin/mingw/bin/g++.exe - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+CMake Error at CMakeLists.txt:13 (add_subdirectory):
+  add_subdirectory given source "JUCE" which is not an existing directory.
+
+
+CMake Error at CMakeLists.txt:23 (juce_add_plugin):
+  Unknown CMake command "juce_add_plugin".
+
+
+-- Configuring incomplete, errors occurred!
